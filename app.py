@@ -109,6 +109,7 @@ def clean_and_extract_df(df):
     gw_keys = ['gross weight', 'gross_weight', 'gw', 'berat kotor', 'bruto', 'gross', 'berat_kotor', 'berat_bruto', 'net weight', 'net_weight']
     amt_keys = ['fob', 'cif', 'amount', 'total amount', 'amount us $', 'total harga', 'nilai pabean', 'nilai', 'price', 'total price', 'nilai_incoterm', 'harga']
 
+    # Pastikan nama kolom semuanya bertipe string
     cols_lower = [str(c).strip().lower() for c in df.columns]
 
     has_qty = any(any(k == c or k in c for k in qty_keys) for c in cols_lower)
@@ -125,13 +126,14 @@ def clean_and_extract_df(df):
                 break
 
         if header_row_idx is not None:
-            df.columns = df.iloc[header_row_idx].astype(str).str.strip().str.lower()
+            df.columns = [str(c).strip().lower() for c in df.iloc[header_row_idx].values]
             df = df.iloc[header_row_idx + 1:].reset_index(drop=True)
     else:
         df.columns = cols_lower
 
+    # Filter baris SUB TOTAL / TOTAL
     df_clean = df.copy()
-    row_text_summary = df_clean.astype(str).apply(lambda row: " ".join(row.values).lower(), axis=1)
+    row_text_summary = df_clean.apply(lambda row: " ".join([str(v).lower() for v in row.values if pd.notna(v)]), axis=1)
     df_clean = df_clean[~row_text_summary.str.contains(r'sub\s*total|subtotal|grand\s*total|^total', regex=True)].reset_index(drop=True)
 
     qty_col = next((c for c in df_clean.columns if any(k == str(c) or k in str(c) for k in qty_keys)), None)
@@ -173,13 +175,11 @@ def load_data(uploaded_file):
         return "text", None, qty, gw, amt
 
 def check_item_level_mismatches(df_inv, df_ceisa):
-    """Pemeriksaan detail item-by-item untuk menemukan seri barang CEISA mana yang berbeda."""
     mismatches = []
     
     if df_inv is None or df_ceisa is None:
         return mismatches
 
-    # Identifikasi kolom kode barang & harga
     code_keys = ['product code', 'kode barang', 'kode_barang', 'item code', 'part number']
     amt_keys = ['fob', 'amount us $', 'amount', 'total amount', 'nilai pabean']
 
@@ -191,7 +191,6 @@ def check_item_level_mismatches(df_inv, df_ceisa):
     ceisa_seri_col = next((c for c in df_ceisa.columns if 'seri' in str(c)), None)
 
     if inv_code_col and inv_amt_col and ceisa_code_col and ceisa_amt_col:
-        # Buat dictionary item Invoice
         inv_dict = {}
         for idx, row in df_inv.iterrows():
             code = str(row[inv_code_col]).strip().lower()
@@ -199,7 +198,6 @@ def check_item_level_mismatches(df_inv, df_ceisa):
             if code and code != 'nan' and amt > 0:
                 inv_dict[code] = inv_dict.get(code, 0.0) + amt
 
-        # Bandingkan dengan tiap seri di CEISA
         for idx, row in df_ceisa.iterrows():
             seri = row[ceisa_seri_col] if ceisa_seri_col else idx + 1
             code = str(row[ceisa_code_col]).strip().lower()
@@ -279,7 +277,6 @@ if st.button("🚀 Jalankan Validasi", type="primary"):
             else:
                 st.error("Ditemukan ketidakcocokan data. Periksa detail revisi di bawah ini!")
 
-                # DETEKSI ITEM SELISIH DENGAN DETAIL NOMOR SERI BARANG CEISA
                 if type_inv == "table" and type_ceisa == "table":
                     item_errors = check_item_level_mismatches(data_inv, data_ceisa)
                     if item_errors:
