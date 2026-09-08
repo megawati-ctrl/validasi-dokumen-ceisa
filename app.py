@@ -39,28 +39,27 @@ def extract_numbers_from_pdf(pdf_file):
                 return 0.0
         return 0.0
 
-    qty = find_val(r"(?:qty|quantity|jumlah)\s*[:=]?\s*([\d\.,]+)")
-    gw = find_val(r"(?:gross\s*weight|gw|berat\s*kotor)\s*[:=]?\s*([\d\.,]+)")
+    qty = find_val(r"(?:qty|quantity|jumlah|total\s*qty)\s*[:=]?\s*([\d\.,]+)")
+    gw = find_val(r"(?:gross\s*weight|gw|berat\s*kotor|total\s*gw)\s*[:=]?\s*([\d\.,]+)")
     return qty, gw, text
 
 def read_excel_smart(uploaded_file):
-    """Membaca berbagai jenis format file Excel menggunakan berbagai engine secara bergantian"""
     bytes_data = uploaded_file.read()
     uploaded_file.seek(0)
     
-    # 1. Coba Pakai Engine Calamine (Paling ampuh membaca file rusak/lama)
+    # 1. Calamine
     try:
         return pd.read_excel(io.BytesIO(bytes_data), engine='calamine')
     except Exception:
         pass
 
-    # 2. Coba Pakai Engine xlrd/openpyxl standar
+    # 2. Excel Standar
     try:
         return pd.read_excel(io.BytesIO(bytes_data))
     except Exception:
         pass
 
-    # 3. Coba Baca sebagai HTML Table
+    # 3. HTML Table
     try:
         dfs = pd.read_html(io.BytesIO(bytes_data))
         if dfs:
@@ -68,21 +67,67 @@ def read_excel_smart(uploaded_file):
     except Exception:
         pass
 
-    # 4. Coba Baca sebagai CSV dengan berbagai pemisah (koma, titik koma, tab)
+    # 4. CSV
     for sep in [',', ';', '\t', '|']:
         try:
             return pd.read_csv(io.BytesIO(bytes_data), sep=sep)
         except Exception:
             pass
 
-    # 5. Jika gagal total, baca isi file sebagai teks untuk dicari angkanya
+    # 5. Fallback Text
     try:
-        text_content = bytes_data.decode('utf-8', errors='ignore')
-        return text_content
+        return bytes_data.decode('utf-8', errors='ignore')
     except Exception:
         pass
 
     raise ValueError("File korup atau formatnya tidak didukung.")
+
+def clean_and_extract_df(df):
+    """Mencari header tabel yang sebenarnya dan menjumlahkan kolom Qty/GW"""
+    if df is None or df.empty:
+        return df, 0.0, 0.0
+
+    # Ubah semua data ke string sementara untuk pencarian kata kunci header
+    df_str = df.astype(str).apply(lambda x: x.str.lower())
+    
+    # Kata kunci pencarian kolom
+    qty_keys = ['qty', 'quantity', 'jumlah', 'jml', 'jumlah barang', 'kuantitas']
+    gw_keys = ['gross weight', 'gross_weight', 'gw', 'berat kotor', 'bruto', 'gross']
+
+    header_row_idx = None
+
+    # Cari di baris berapa header tabel berada
+    for idx, row in df_str.iterrows():
+        row_values = " ".join(row.values)
+        if any(k in row_values for k in qty_keys + gw_keys):
+            header_row_idx = idx
+            break
+
+    # Jika ketemu baris header di tengah/bawah, jadikan baris tersebut sebagai nama kolom
+    if header_row_idx is not None and header_row_idx > 0:
+        df.columns = df.iloc[header_row_idx].astype(str).str.strip().str.lower()
+        df = df.iloc[header_row_idx + 1:].reset_index(drop=True)
+    else:
+        df.columns = df.columns.astype(str).str.strip().str.lower()
+
+    # Cari kolom Qty & Gross Weight
+    qty_col = next((c for c in df.columns if any(k in c for k in qty_keys)), None)
+    gw_col = next((c for c in df.columns if any(k in c for k in gw_keys)), None)
+
+    def sum_column(col_name):
+        if col_name and col_name in df.columns:
+            # Bersihkan karakter non-angka (seperti koma, spasi, kg)
+            cleaned_series = pd.to_numeric(
+                df[col_name].astype(str).str.replace(r'[^\d\.]', '', regex=True), 
+                errors='coerce'
+            ).fillna(0)
+            return float(cleaned_series.sum())
+        return 0.0
+
+    total_qty = sum_column(qty_col)
+    total_gw = sum_column(gw_col)
+
+    return df, total_qty, total_gw
 
 def load_data(uploaded_file):
     if uploaded_file is None:
@@ -97,14 +142,9 @@ def load_data(uploaded_file):
     parsed = read_excel_smart(uploaded_file)
     
     if isinstance(parsed, pd.DataFrame):
-        df = parsed
-        df.columns = df.columns.astype(str).str.strip().str.lower()
-        
-        qty = df['qty'].sum() if 'qty' in df.columns else 0.0
-        gw = df['gross_weight'].sum() if 'gross_weight' in df.columns else 0.0
+        df, qty, gw = clean_and_extract_df(parsed)
         return "table", df, qty, gw
     else:
-        # Jika berupa teks mentah
         text = parsed
         def find_val(pattern):
             match = re.search(pattern, text, re.IGNORECASE)
