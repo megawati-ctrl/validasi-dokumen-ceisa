@@ -173,34 +173,31 @@ def load_data(uploaded_file):
         return "text", None, qty, gw, amt
 
 def check_item_level_mismatches(df_inv, df_pl, df_ceisa):
-    """Pemeriksaan presisi dengan agregasi total per Kode Barang untuk mencegah false positive."""
+    """Pemeriksaan kolektif berbasis agregasi total per item."""
     mismatches = []
-    if df_ceisa is None:
+    if df_ceisa is None or df_inv is None:
         return mismatches
 
     code_keys = ['product code', 'kode barang', 'kode_barang', 'item code', 'part number']
     fob_keys = ['fob', 'amount us $', 'amount', 'total amount', 'nilai pabean']
     gw_keys = ['gross weight', 'gross_weight', 'gw', 'berat kotor', 'bruto', 'gross', 'berat_kotor', 'berat_bruto', 'net weight', 'net_weight']
 
-    # Identifikasi Kolom CEISA
     ceisa_seri_col = next((c for c in df_ceisa.columns if 'seri' in str(c).lower()), None)
     ceisa_code_col = next((c for c in df_ceisa.columns if any(k in str(c).lower() for k in code_keys)), None)
     ceisa_fob_col = next((c for c in df_ceisa.columns if any(k in str(c).lower() for k in fob_keys)), None)
     ceisa_gw_col = next((c for c in df_ceisa.columns if any(k in str(c).lower() for k in gw_keys)), None)
 
-    # Identifikasi Kolom Invoice
-    inv_code_col = next((c for c in df_inv.columns if any(k in str(c).lower() for k in code_keys)), None) if df_inv is not None else None
-    inv_item_col = next((c for c in df_inv.columns if 'item code' in str(c).lower()), None) if df_inv is not None else None
-    inv_fob_col = next((c for c in df_inv.columns if any(k in str(c).lower() for k in fob_keys)), None) if df_inv is not None else None
+    inv_code_col = next((c for c in df_inv.columns if any(k in str(c).lower() for k in code_keys)), None)
+    inv_item_col = next((c for c in df_inv.columns if 'item code' in str(c).lower()), None)
+    inv_fob_col = next((c for c in df_inv.columns if any(k in str(c).lower() for k in fob_keys)), None)
 
-    # Identifikasi Kolom Packing List
     pl_code_col = next((c for c in df_pl.columns if any(k in str(c).lower() for k in code_keys)), None) if df_pl is not None else None
     pl_gw_col = next((c for c in df_pl.columns if any(k in str(c).lower() for k in gw_keys)), None) if df_pl is not None else None
 
-    # 1. Agregasi total FOB per Product Code di Invoice
+    # Pemetaan FOB Invoice & Pemetaan Product Code -> Item Code
     inv_fob_map = {}
     inv_prod_to_item = {}
-    if df_inv is not None and inv_code_col and inv_fob_col:
+    if inv_code_col and inv_fob_col:
         for _, r in df_inv.iterrows():
             pc = str(r[inv_code_col]).strip().lower()
             f_val = clean_num(r[inv_fob_col])
@@ -210,7 +207,7 @@ def check_item_level_mismatches(df_inv, df_pl, df_ceisa):
                 if ic and ic != 'nan':
                     inv_prod_to_item[pc] = ic
 
-    # 2. Agregasi total Berat per Item Code di Packing List
+    # Pemetaan Akumulasi Berat Packing List per Item Code
     pl_gw_map = {}
     if df_pl is not None and pl_code_col and pl_gw_col:
         for _, r in df_pl.iterrows():
@@ -219,7 +216,7 @@ def check_item_level_mismatches(df_inv, df_pl, df_ceisa):
             if ic and ic != 'nan':
                 pl_gw_map[ic] = pl_gw_map.get(ic, 0.0) + w_val
 
-    # 3. Urutkan CEISA
+    # Urutkan CEISA berdasar Nomor Seri
     df_ceisa_sorted = df_ceisa.copy()
     if ceisa_seri_col:
         df_ceisa_sorted['seri_num'] = pd.to_numeric(df_ceisa_sorted[ceisa_seri_col], errors='coerce')
@@ -232,10 +229,7 @@ def check_item_level_mismatches(df_inv, df_pl, df_ceisa):
         ceisa_gw = clean_num(row_ceisa[ceisa_gw_col]) if ceisa_gw_col else 0.0
         uraian = str(row_ceisa.get('uraian', row_ceisa.get('description', '-')))
 
-        # Ambil acuan total FOB Invoice
         inv_fob = inv_fob_map.get(code)
-
-        # Ambil acuan total Berat PL
         item_code = inv_prod_to_item.get(code, code)
         pl_gw = pl_gw_map.get(item_code, pl_gw_map.get(code))
 
