@@ -5,3 +5,4 @@ xlrd
 pypdf
 lxml
 html5lib
+python-calamine
