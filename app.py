@@ -130,15 +130,19 @@ def clean_and_extract_df(df):
     else:
         df.columns = cols_lower
 
-    qty_col = next((c for c in df.columns if any(k == str(c) or k in str(c) for k in qty_keys)), None)
-    gw_col = next((c for c in df.columns if any(k == str(c) or k in str(c) for k in gw_keys)), None)
-    amt_col = next((c for c in df.columns if any(k == str(c) or k in str(c) for k in amt_keys)), None)
+    df_clean = df.copy()
+    row_text_summary = df_clean.astype(str).apply(lambda row: " ".join(row.values).lower(), axis=1)
+    df_clean = df_clean[~row_text_summary.str.contains(r'sub\s*total|subtotal|grand\s*total|^total', regex=True)].reset_index(drop=True)
 
-    total_qty = float(df[qty_col].apply(clean_num).sum()) if qty_col else 0.0
-    total_gw = float(df[gw_col].apply(clean_num).sum()) if gw_col else 0.0
-    total_amt = float(df[amt_col].apply(clean_num).sum()) if amt_col else 0.0
+    qty_col = next((c for c in df_clean.columns if any(k == str(c) or k in str(c) for k in qty_keys)), None)
+    gw_col = next((c for c in df_clean.columns if any(k == str(c) or k in str(c) for k in gw_keys)), None)
+    amt_col = next((c for c in df_clean.columns if any(k == str(c) or k in str(c) for k in amt_keys)), None)
 
-    return df, total_qty, total_gw, total_amt
+    total_qty = float(df_clean[qty_col].apply(clean_num).sum()) if qty_col else 0.0
+    total_gw = float(df_clean[gw_col].apply(clean_num).sum()) if gw_col else 0.0
+    total_amt = float(df_clean[amt_col].apply(clean_num).sum()) if amt_col else 0.0
+
+    return df_clean, total_qty, total_gw, total_amt
 
 def load_data(uploaded_file):
     if uploaded_file is None:
@@ -167,6 +171,56 @@ def load_data(uploaded_file):
         gw = find_val(r"(?:gross\s*weight|gw|berat\s*kotor)\s*[:=]?\s*([\d\.,]+)")
         amt = find_val(r"(?:fob|cif|total\s*amount|amount|nilai)\s*[:=]?\s*([\d\.,]+)")
         return "text", None, qty, gw, amt
+
+def check_item_level_mismatches(df_inv, df_ceisa):
+    """Pemeriksaan detail item-by-item untuk menemukan seri barang CEISA mana yang berbeda."""
+    mismatches = []
+    
+    if df_inv is None or df_ceisa is None:
+        return mismatches
+
+    # Identifikasi kolom kode barang & harga
+    code_keys = ['product code', 'kode barang', 'kode_barang', 'item code', 'part number']
+    amt_keys = ['fob', 'amount us $', 'amount', 'total amount', 'nilai pabean']
+
+    inv_code_col = next((c for c in df_inv.columns if any(k in str(c) for k in code_keys)), None)
+    inv_amt_col = next((c for c in df_inv.columns if any(k in str(c) for k in amt_keys)), None)
+    
+    ceisa_code_col = next((c for c in df_ceisa.columns if any(k in str(c) for k in code_keys)), None)
+    ceisa_amt_col = next((c for c in df_ceisa.columns if any(k in str(c) for k in amt_keys)), None)
+    ceisa_seri_col = next((c for c in df_ceisa.columns if 'seri' in str(c)), None)
+
+    if inv_code_col and inv_amt_col and ceisa_code_col and ceisa_amt_col:
+        # Buat dictionary item Invoice
+        inv_dict = {}
+        for idx, row in df_inv.iterrows():
+            code = str(row[inv_code_col]).strip().lower()
+            amt = clean_num(row[inv_amt_col])
+            if code and code != 'nan' and amt > 0:
+                inv_dict[code] = inv_dict.get(code, 0.0) + amt
+
+        # Bandingkan dengan tiap seri di CEISA
+        for idx, row in df_ceisa.iterrows():
+            seri = row[ceisa_seri_col] if ceisa_seri_col else idx + 1
+            code = str(row[ceisa_code_col]).strip().lower()
+            ceisa_amt = clean_num(row[ceisa_amt_col])
+            uraian = row.get('uraian', row.get('description', '-'))
+
+            if code in inv_dict:
+                inv_amt = inv_dict[code]
+                diff = abs(ceisa_amt - inv_amt)
+                if diff > 0.01:
+                    mismatches.append({
+                        "Seri CEISA": seri,
+                        "Kode Barang": code.upper(),
+                        "Uraian Barang": uraian,
+                        "Nilai Invoice (USD)": f"${inv_amt:,.2f}",
+                        "Nilai CEISA (USD)": f"${ceisa_amt:,.2f}",
+                        "Selisih (USD)": f"${diff:,.2f}",
+                        "Rekomendasi Revisi": f"Revisi nilai FOB pada Seri {seri} di CEISA menjadi ${inv_amt:,.2f}"
+                    })
+
+    return mismatches
 
 if st.button("🚀 Jalankan Validasi", type="primary"):
     if file_inv and file_pl and file_ceisa:
@@ -223,7 +277,17 @@ if st.button("🚀 Jalankan Validasi", type="primary"):
             if is_all_valid:
                 st.success("Semua data cocok! Dokumen siap diproses.")
             else:
-                st.error("Ditemukan ketidakcocokan data. Periksa kembali entri dokumen!")
+                st.error("Ditemukan ketidakcocokan data. Periksa detail revisi di bawah ini!")
+
+                # DETEKSI ITEM SELISIH DENGAN DETAIL NOMOR SERI BARANG CEISA
+                if type_inv == "table" and type_ceisa == "table":
+                    item_errors = check_item_level_mismatches(data_inv, data_ceisa)
+                    if item_errors:
+                        st.markdown("### ⚠️ Detail Dokumen & Nomor Seri Yang Harus Direvisi di CEISA")
+                        df_err = pd.DataFrame(item_errors)
+                        st.dataframe(df_err, use_container_width=True)
+                    else:
+                        st.info("Penyebab selisih diduga akibat perbedaan total gabungan atau entri yang belum lengkap di CEISA.")
 
             with st.expander("Lihat Detail Data Uploaded"):
                 col_a, col_b, col_c = st.columns(3)
