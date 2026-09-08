@@ -83,40 +83,37 @@ def read_excel_smart(uploaded_file):
     raise ValueError("File korup atau formatnya tidak didukung.")
 
 def clean_and_extract_df(df):
-    """Mencari header tabel yang sebenarnya dan menjumlahkan kolom Qty/GW"""
+    """Mencari header tabel yang sebenarnya dan menjumlahkan kolom Qty/GW secara aman"""
     if df is None or df.empty:
         return df, 0.0, 0.0
 
-    # Ubah semua data ke string sementara untuk pencarian kata kunci header
-    df_str = df.astype(str).apply(lambda x: x.str.lower())
-    
     # Kata kunci pencarian kolom
     qty_keys = ['qty', 'quantity', 'jumlah', 'jml', 'jumlah barang', 'kuantitas']
     gw_keys = ['gross weight', 'gross_weight', 'gw', 'berat kotor', 'bruto', 'gross']
 
     header_row_idx = None
 
-    # Cari di baris berapa header tabel berada
-    for idx, row in df_str.iterrows():
-        row_values = " ".join(row.values)
-        if any(k in row_values for k in qty_keys + gw_keys):
+    # Cari baris header secara aman dengan konversi str otomatis
+    for idx, row in df.iterrows():
+        row_str_list = [str(val).lower() for val in row.values if pd.notna(val)]
+        row_combined = " ".join(row_str_list)
+        if any(k in row_combined for k in qty_keys + gw_keys):
             header_row_idx = idx
             break
 
-    # Jika ketemu baris header di tengah/bawah, jadikan baris tersebut sebagai nama kolom
+    # Jika header ditemukan di baris bawah
     if header_row_idx is not None and header_row_idx > 0:
         df.columns = df.iloc[header_row_idx].astype(str).str.strip().str.lower()
         df = df.iloc[header_row_idx + 1:].reset_index(drop=True)
     else:
         df.columns = df.columns.astype(str).str.strip().str.lower()
 
-    # Cari kolom Qty & Gross Weight
+    # Cari nama kolom yang cocok
     qty_col = next((c for c in df.columns if any(k in c for k in qty_keys)), None)
     gw_col = next((c for c in df.columns if any(k in c for k in gw_keys)), None)
 
     def sum_column(col_name):
         if col_name and col_name in df.columns:
-            # Bersihkan karakter non-angka (seperti koma, spasi, kg)
             cleaned_series = pd.to_numeric(
                 df[col_name].astype(str).str.replace(r'[^\d\.]', '', regex=True), 
                 errors='coerce'
