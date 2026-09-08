@@ -47,7 +47,7 @@ def read_excel_smart(uploaded_file):
     bytes_data = uploaded_file.read()
     uploaded_file.seek(0)
     
-    # 1. Calamine
+    # 1. Engine Calamine
     try:
         return pd.read_excel(io.BytesIO(bytes_data), engine='calamine')
     except Exception:
@@ -74,26 +74,24 @@ def read_excel_smart(uploaded_file):
         except Exception:
             pass
 
-    # 5. Fallback Text
+    # 5. Teks Mentah
     try:
         return bytes_data.decode('utf-8', errors='ignore')
     except Exception:
         pass
 
-    raise ValueError("File korup atau formatnya tidak didukung.")
+    raise ValueError("File tidak dapat dibaca.")
 
 def clean_and_extract_df(df):
-    """Mencari header tabel yang sebenarnya dan menjumlahkan kolom Qty/GW secara aman"""
     if df is None or df.empty:
         return df, 0.0, 0.0
 
     # Kata kunci pencarian kolom
-    qty_keys = ['qty', 'quantity', 'jumlah', 'jml', 'jumlah barang', 'kuantitas']
-    gw_keys = ['gross weight', 'gross_weight', 'gw', 'berat kotor', 'bruto', 'gross']
+    qty_keys = ['qty', 'quantity', 'jumlah', 'jml', 'jumlah barang', 'kuantitas', 'jumlah_satuan', 'jumlah_kemasan']
+    gw_keys = ['gross weight', 'gross_weight', 'gw', 'berat kotor', 'bruto', 'gross', 'berat_kotor', 'berat_bruto']
 
     header_row_idx = None
 
-    # Cari baris header secara aman dengan konversi str otomatis
     for idx, row in df.iterrows():
         row_str_list = [str(val).lower() for val in row.values if pd.notna(val)]
         row_combined = " ".join(row_str_list)
@@ -101,16 +99,14 @@ def clean_and_extract_df(df):
             header_row_idx = idx
             break
 
-    # Jika header ditemukan di baris bawah
     if header_row_idx is not None and header_row_idx > 0:
         df.columns = df.iloc[header_row_idx].astype(str).str.strip().str.lower()
         df = df.iloc[header_row_idx + 1:].reset_index(drop=True)
     else:
         df.columns = df.columns.astype(str).str.strip().str.lower()
 
-    # Cari nama kolom yang cocok
-    qty_col = next((c for c in df.columns if any(k in c for k in qty_keys)), None)
-    gw_col = next((c for c in df.columns if any(k in c for k in gw_keys)), None)
+    qty_col = next((c for c in df.columns if any(k in str(c) for k in qty_keys)), None)
+    gw_col = next((c for c in df.columns if any(k in str(c) for k in gw_keys)), None)
 
     def sum_column(col_name):
         if col_name and col_name in df.columns:
@@ -142,7 +138,7 @@ def load_data(uploaded_file):
         df, qty, gw = clean_and_extract_df(parsed)
         return "table", df, qty, gw
     else:
-        text = parsed
+        text = str(parsed)
         def find_val(pattern):
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -199,15 +195,27 @@ if st.button("🚀 Jalankan Validasi", type="primary"):
 
             with st.expander("Lihat Detail Data Uploaded"):
                 col_a, col_b, col_c = st.columns(3)
+                
                 with col_a:
                     st.subheader("Detail Invoice")
-                    st.dataframe(data_inv) if type_inv == "table" else st.text("Konten berhasil dibaca sebagai teks")
+                    if type_inv == "table":
+                        st.dataframe(data_inv)
+                    else:
+                        st.text("Konten dibaca sebagai teks/PDF")
+
                 with col_b:
                     st.subheader("Detail Packing List")
-                    st.dataframe(data_pl) if type_pl == "table" else st.text("Konten berhasil dibaca sebagai teks")
+                    if type_pl == "table":
+                        st.dataframe(data_pl)
+                    else:
+                        st.text("Konten dibaca sebagai teks/PDF")
+
                 with col_c:
                     st.subheader("Detail CEISA")
-                    st.dataframe(data_ceisa) if type_ceisa == "table" else st.text("Konten berhasil dibaca sebagai teks")
+                    if type_ceisa == "table":
+                        st.dataframe(data_ceisa)
+                    else:
+                        st.text("Konten dibaca sebagai teks/PDF")
 
         except Exception as e:
             st.error(f"Terjadi kesalahan saat membaca file: {e}")
