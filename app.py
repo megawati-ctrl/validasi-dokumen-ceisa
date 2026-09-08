@@ -173,7 +173,7 @@ def load_data(uploaded_file):
         return "text", None, qty, gw, amt
 
 def check_item_level_mismatches(df_inv, df_pl, df_ceisa):
-    """Pemeriksaan detail presisi per seri barang (mencakup Nilai FOB dan Berat sekaligus)."""
+    """Pemeriksaan presisi dengan agregasi total per Kode Barang untuk mencegah false positive."""
     mismatches = []
     if df_ceisa is None:
         return mismatches
@@ -181,82 +181,63 @@ def check_item_level_mismatches(df_inv, df_pl, df_ceisa):
     code_keys = ['product code', 'kode barang', 'kode_barang', 'item code', 'part number']
     fob_keys = ['fob', 'amount us $', 'amount', 'total amount', 'nilai pabean']
     gw_keys = ['gross weight', 'gross_weight', 'gw', 'berat kotor', 'bruto', 'gross', 'berat_kotor', 'berat_bruto', 'net weight', 'net_weight']
-    qty_keys = ['qty', 'quantity', 'jumlah']
 
-    # Sort CEISA berdasarkan nomor seri
+    # Identifikasi Kolom CEISA
     ceisa_seri_col = next((c for c in df_ceisa.columns if 'seri' in str(c).lower()), None)
+    ceisa_code_col = next((c for c in df_ceisa.columns if any(k in str(c).lower() for k in code_keys)), None)
+    ceisa_fob_col = next((c for c in df_ceisa.columns if any(k in str(c).lower() for k in fob_keys)), None)
+    ceisa_gw_col = next((c for c in df_ceisa.columns if any(k in str(c).lower() for k in gw_keys)), None)
+
+    # Identifikasi Kolom Invoice
+    inv_code_col = next((c for c in df_inv.columns if any(k in str(c).lower() for k in code_keys)), None) if df_inv is not None else None
+    inv_item_col = next((c for c in df_inv.columns if 'item code' in str(c).lower()), None) if df_inv is not None else None
+    inv_fob_col = next((c for c in df_inv.columns if any(k in str(c).lower() for k in fob_keys)), None) if df_inv is not None else None
+
+    # Identifikasi Kolom Packing List
+    pl_code_col = next((c for c in df_pl.columns if any(k in str(c).lower() for k in code_keys)), None) if df_pl is not None else None
+    pl_gw_col = next((c for c in df_pl.columns if any(k in str(c).lower() for k in gw_keys)), None) if df_pl is not None else None
+
+    # 1. Agregasi total FOB per Product Code di Invoice
+    inv_fob_map = {}
+    inv_prod_to_item = {}
+    if df_inv is not None and inv_code_col and inv_fob_col:
+        for _, r in df_inv.iterrows():
+            pc = str(r[inv_code_col]).strip().lower()
+            f_val = clean_num(r[inv_fob_col])
+            ic = str(r[inv_item_col]).strip().lower() if inv_item_col else ""
+            if pc and pc != 'nan':
+                inv_fob_map[pc] = inv_fob_map.get(pc, 0.0) + f_val
+                if ic and ic != 'nan':
+                    inv_prod_to_item[pc] = ic
+
+    # 2. Agregasi total Berat per Item Code di Packing List
+    pl_gw_map = {}
+    if df_pl is not None and pl_code_col and pl_gw_col:
+        for _, r in df_pl.iterrows():
+            ic = str(r[pl_code_col]).strip().lower()
+            w_val = clean_num(r[pl_gw_col])
+            if ic and ic != 'nan':
+                pl_gw_map[ic] = pl_gw_map.get(ic, 0.0) + w_val
+
+    # 3. Urutkan CEISA
     df_ceisa_sorted = df_ceisa.copy()
     if ceisa_seri_col:
         df_ceisa_sorted['seri_num'] = pd.to_numeric(df_ceisa_sorted[ceisa_seri_col], errors='coerce')
         df_ceisa_sorted = df_ceisa_sorted.sort_values(by='seri_num').drop(columns=['seri_num']).reset_index(drop=True)
 
-    # Menyiapkan kolom Invoice
-    df_inv_clean = df_inv.dropna(how='all').copy() if df_inv is not None else None
-    inv_code_col = next((c for c in df_inv_clean.columns if any(k in str(c).lower() for k in code_keys)), None) if df_inv_clean is not None else None
-    inv_item_col = next((c for c in df_inv_clean.columns if 'item code' in str(c).lower()), None) if df_inv_clean is not None else None
-    inv_fob_col = next((c for c in df_inv_clean.columns if any(k in str(c).lower() for k in fob_keys)), None) if df_inv_clean is not None else None
-    inv_qty_col = next((c for c in df_inv_clean.columns if any(k in str(c).lower() for k in qty_keys)), None) if df_inv_clean is not None else None
-
-    # Menyiapkan kolom Packing List
-    df_pl_clean = df_pl.dropna(how='all').copy() if df_pl is not None else None
-    pl_code_col = next((c for c in df_pl_clean.columns if any(k in str(c).lower() for k in code_keys)), None) if df_pl_clean is not None else None
-    pl_gw_col = next((c for c in df_pl_clean.columns if any(k in str(c).lower() for k in gw_keys)), None) if df_pl_clean is not None else None
-    pl_qty_col = next((c for c in df_pl_clean.columns if any(k in str(c).lower() for k in qty_keys)), None) if df_pl_clean is not None else None
-
-    # Kolom CEISA
-    ceisa_code_col = next((c for c in df_ceisa_sorted.columns if any(k in str(c).lower() for k in code_keys)), None)
-    ceisa_fob_col = next((c for c in df_ceisa_sorted.columns if any(k in str(c).lower() for k in fob_keys)), None)
-    ceisa_gw_col = next((c for c in df_ceisa_sorted.columns if any(k in str(c).lower() for k in gw_keys)), None)
-    ceisa_qty_col = next((c for c in df_ceisa_sorted.columns if any(k in str(c).lower() for k in qty_keys)), None)
-
-    # Pemetaan dari Invoice: (Product Code, Qty) -> (FOB Amount, Item Code)
-    inv_bridge = {}
-    if df_inv_clean is not None and inv_code_col and inv_fob_col:
-        for _, r in df_inv_clean.iterrows():
-            p_code = str(r[inv_code_col]).strip().lower()
-            q_val = str(r[inv_qty_col]).strip() if inv_qty_col else ""
-            f_val = clean_num(r[inv_fob_col])
-            i_code = str(r[inv_item_col]).strip().lower() if inv_item_col else ""
-            if p_code and p_code != 'nan' and f_val > 0:
-                inv_bridge[(p_code, q_val)] = (f_val, i_code)
-                inv_bridge[p_code] = (f_val, i_code)
-
-    # Pemetaan dari Packing List: (Item Code / Product Code, Qty) -> Weight
-    pl_map = {}
-    if df_pl_clean is not None and pl_code_col and pl_gw_col:
-        for _, r in df_pl_clean.iterrows():
-            c_val = str(r[pl_code_col]).strip().lower()
-            q_val = str(r[pl_qty_col]).strip() if pl_qty_col else ""
-            w_val = clean_num(r[pl_gw_col])
-            if c_val and c_val != 'nan' and w_val > 0:
-                pl_map[(c_val, q_val)] = w_val
-                pl_map[c_val] = w_val
-
     for idx, row_ceisa in df_ceisa_sorted.iterrows():
         seri = row_ceisa[ceisa_seri_col] if ceisa_seri_col else idx + 1
-        code = str(row_ceisa[ceisa_code_col]).strip() if ceisa_code_col else "-"
-        q_str = str(row_ceisa[ceisa_qty_col]).strip() if ceisa_qty_col else ""
+        code = str(row_ceisa[ceisa_code_col]).strip().lower() if ceisa_code_col else "-"
         ceisa_fob = clean_num(row_ceisa[ceisa_fob_col]) if ceisa_fob_col else 0.0
         ceisa_gw = clean_num(row_ceisa[ceisa_gw_col]) if ceisa_gw_col else 0.0
         uraian = str(row_ceisa.get('uraian', row_ceisa.get('description', '-')))
 
-        # Pencarian acuan FOB Invoice & Item Code
-        inv_fob, item_code = None, None
-        if (code.lower(), q_str) in inv_bridge:
-            inv_fob, item_code = inv_bridge[(code.lower(), q_str)]
-        elif code.lower() in inv_bridge:
-            inv_fob, item_code = inv_bridge[code.lower()]
+        # Ambil acuan total FOB Invoice
+        inv_fob = inv_fob_map.get(code)
 
-        # Pencarian acuan Berat Packing List
-        pl_gw = None
-        if item_code and (item_code, q_str) in pl_map:
-            pl_gw = pl_map[(item_code, q_str)]
-        elif item_code and item_code in pl_map:
-            pl_gw = pl_map[item_code]
-        elif (code.lower(), q_str) in pl_map:
-            pl_gw = pl_map[(code.lower(), q_str)]
-        elif code.lower() in pl_map:
-            pl_gw = pl_map[code.lower()]
+        # Ambil acuan total Berat PL
+        item_code = inv_prod_to_item.get(code, code)
+        pl_gw = pl_gw_map.get(item_code, pl_gw_map.get(code))
 
         fob_diff = abs(ceisa_fob - inv_fob) if inv_fob is not None else 0.0
         gw_diff = abs(ceisa_gw - pl_gw) if pl_gw is not None else 0.0
