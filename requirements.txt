@@ -2,3 +2,6 @@ streamlit
 pandas
 openpyxl
 xlrd
+pypdf
+lxml
+html5lib
